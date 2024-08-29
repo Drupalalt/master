@@ -1,0 +1,58 @@
+name: CI
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # Clean up Disk Space
+      - name: Remove Unnecessary Applications
+        run: |
+          # Remove unnecessary features
+          Get-WindowsFeature | Where-Object { $_.Installed -eq $true } | Uninstall-WindowsFeature -Remove
+
+          # Uninstall most pre-installed programs
+          Get-AppxPackage | Remove-AppxPackage
+
+          # Clean up disk space
+          Remove-Item -Recurse -Force "C:\Program Files\*" -Exclude "Google", "Docker"
+          Remove-Item -Recurse -Force "C:\Program Files (x86)\*" -Exclude "Google", "Docker"
+          Remove-Item -Recurse -Force "C:\ProgramData\Package Cache\*"
+          Remove-Item -Recurse -Force "C:\ProgramData\Docker"
+          Remove-Item -Recurse -Force "C:\Users\runneradmin\AppData\Local\Temp\*"
+          Remove-Item -Recurse -Force "C:\Users\runneradmin\.nuget\packages\*"
+          Remove-Item -Recurse -Force "C:\Windows\Temp\*"
+
+      # Reinstall Chrome
+      - name: Install Google Chrome
+        run: |
+          $chromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+          if (-Not (Test-Path $chromePath)) {
+            Start-Process -FilePath msiexec.exe -ArgumentList "/i https://dl.google.com/chrome/install/375.126/chrome_installer.exe /quiet /norestart" -Wait
+          }
+
+      # Continue with your original steps
+      - name: Download Ngrok
+        run: Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+
+      - name: Extract Ngrok
+        run: Expand-Archive ngrok.zip
+
+      - name: Auth Ngrok
+        run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+
+      - name: Enable Remote Desktop
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
+
+      - name: Set User Password
+        run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
+
+      - name: Create Ngrok Tunnel
+        run: .\ngrok\ngrok.exe tcp 3389
