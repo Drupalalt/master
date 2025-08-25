@@ -1,4 +1,4 @@
-name: Host Stremio Server (From Scratch)
+name: Host Stremio Server (From Scratch - Fixed Path)
 
 on:
   workflow_dispatch:
@@ -10,12 +10,16 @@ jobs:
       - name: Install and Run Stremio Server
         shell: pwsh
         run: |
-          # The GitHub runner comes with Node.js and npm pre-installed.
           echo "Installing Stremio Server CLI..."
           npm install -g @stremio/server-cli
           
-          echo "Starting Stremio Server in the background..."
-          Start-Process stremio-server
+          # FIX: Get the full path to the installed executable
+          echo "Finding npm global installation path..."
+          $npmPrefix = npm prefix -g
+          $stremioPath = Join-Path $npmPrefix "stremio-server.cmd"
+          
+          echo "Starting Stremio Server from: $stremioPath"
+          Start-Process -FilePath $stremioPath
 
       - name: Download and Prepare ngrok
         shell: pwsh
