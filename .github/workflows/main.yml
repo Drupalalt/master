@@ -1,11 +1,11 @@
-name: Host Stremio Server with Link
+name: Host Stremio Server (Manual Ngrok - Corrected Path)
 
 on:
   workflow_dispatch:
 
 jobs:
-  host:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,40 +16,48 @@ jobs:
           node-version: '20'
 
       - name: Install and Run Stremio Server
+        shell: pwsh
         run: |
           echo "Installing Stremio Server CLI..."
           npm install -g @stremio/server-cli
           
           echo "Starting Stremio Server in the background..."
-          # Run in background and redirect all output to a log file
-          stremio-server > stremio.log 2>&1 &
-          
-      - name: Wait for Server and Check Logs
+          Start-Process stremio-server
+
+      - name: Download and Prepare ngrok
+        shell: pwsh
         run: |
-          echo "Waiting 10 seconds for the server to initialize..."
-          sleep 10
-          echo "--- Displaying Stremio Server Logs ---"
-          cat stremio.log
+          Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+          Expand-Archive ngrok.zip
           
-      - name: Expose Stremio Server with ngrok
-        uses: ngrok/ngrok-agent-action@v1
-        # Add an ID to this step so we can reference its output
-        id: ngrok
-        with:
-          args: http 11470
+      - name: Authenticate ngrok
+        shell: pwsh
+        # FIX: Added the 'ngrok\' sub-directory to the path
+        run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
         env:
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
           
-      - name: 🔗 Create Link in Job Summary
+      - name: Start ngrok Tunnel in Background
+        shell: pwsh
+        # FIX: Added the 'ngrok\' sub-directory to the path
         run: |
-          echo "### Stremio Server is Live! ✨" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Your Streaming Server URL is:**" >> $GITHUB_STEP_SUMMARY
-          echo "[${{ steps.ngrok.outputs.url }}](${{ steps.ngrok.outputs.url }})" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "*Copy this URL and paste it into your Stremio app's streaming settings.*" >> $GITHUB_STEP_SUMMARY
-          echo "*This server will remain active for up to 6 hours or until you cancel it.*" >> $GITHUB_STEP_SUMMARY
-      
+          Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "http", "11470"
+
+      - name: 🔗 Get Link and Create Job Summary
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 5
+          
+          $tunnels = Invoke-RestMethod -Uri http://127.0.0.1:4040/api/tunnels
+          $publicUrl = ($tunnels.tunnels | Where-Object { $_.proto -eq 'https' }).public_url
+          
+          echo "### Stremio Server is Live! ✨" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "**Your Streaming Server URL is:**" >> $env:GITHUB_STEP_SUMMARY
+          echo "[$publicUrl]($publicUrl)" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "*This server will remain active for up to 6 hours.*" >> $env:GITHUB_STEP_SUMMARY
+
       - name: Keep Runner Alive
-        # This step ensures the workflow doesn't exit, keeping the server online.
-        run: tail -f /dev/null
+        shell: pwsh
+        run: Start-Sleep -Seconds 21600
