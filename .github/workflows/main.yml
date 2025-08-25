@@ -1,4 +1,4 @@
-name: Host Stremio Server (Manual Ngrok - Corrected Path)
+name: Host Stremio Server (From Scratch)
 
 on:
   workflow_dispatch:
@@ -7,17 +7,10 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Install and Run Stremio Server
         shell: pwsh
         run: |
+          # The GitHub runner comes with Node.js and npm pre-installed.
           echo "Installing Stremio Server CLI..."
           npm install -g @stremio/server-cli
           
@@ -27,30 +20,35 @@ jobs:
       - name: Download and Prepare ngrok
         shell: pwsh
         run: |
+          echo "Downloading ngrok..."
           Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+          
+          echo "Extracting ngrok..."
           Expand-Archive ngrok.zip
           
       - name: Authenticate ngrok
         shell: pwsh
-        # FIX: Added the 'ngrok\' sub-directory to the path
         run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
         env:
+          # You still need to set this secret in your repository settings
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
           
       - name: Start ngrok Tunnel in Background
         shell: pwsh
-        # FIX: Added the 'ngrok\' sub-directory to the path
         run: |
           Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "http", "11470"
 
       - name: 🔗 Get Link and Create Job Summary
         shell: pwsh
         run: |
-          Start-Sleep -Seconds 5
+          # Wait for ngrok's local API to become available
+          Start-Sleep -Seconds 10
           
+          # Query the ngrok API to get the public URL
           $tunnels = Invoke-RestMethod -Uri http://127.0.0.1:4040/api/tunnels
           $publicUrl = ($tunnels.tunnels | Where-Object { $_.proto -eq 'https' }).public_url
           
+          # Write the link to the Job Summary page for easy access
           echo "### Stremio Server is Live! ✨" >> $env:GITHUB_STEP_SUMMARY
           echo "" >> $env:GITHUB_STEP_SUMMARY
           echo "**Your Streaming Server URL is:**" >> $env:GITHUB_STEP_SUMMARY
@@ -60,4 +58,4 @@ jobs:
 
       - name: Keep Runner Alive
         shell: pwsh
-        run: Start-Sleep -Seconds 21600
+        run: Start-Sleep -Seconds 21600 # Keep alive for 6 hours
