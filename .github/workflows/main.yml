@@ -1,11 +1,11 @@
-name: Host Stremio Server on Windows
+name: Host Stremio Server with Link
 
 on:
   workflow_dispatch:
 
 jobs:
   host:
-    runs-on: windows-latest # Runs on a Windows machine
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,21 +16,40 @@ jobs:
           node-version: '20'
 
       - name: Install and Run Stremio Server
-        # Use PowerShell for Windows commands
-        shell: pwsh
         run: |
-          echo "Installing Stremio Server..."
+          echo "Installing Stremio Server CLI..."
           npm install -g @stremio/server-cli
           
           echo "Starting Stremio Server in the background..."
-          Start-Process stremio-server # This is the Windows way to run a background process
+          # Run in background and redirect all output to a log file
+          stremio-server > stremio.log 2>&1 &
           
-          Start-Sleep -Seconds 5 # Give the server a moment to start
-
+      - name: Wait for Server and Check Logs
+        run: |
+          echo "Waiting 10 seconds for the server to initialize..."
+          sleep 10
+          echo "--- Displaying Stremio Server Logs ---"
+          cat stremio.log
+          
       - name: Expose Stremio Server with ngrok
         uses: ngrok/ngrok-agent-action@v1
+        # Add an ID to this step so we can reference its output
+        id: ngrok
         with:
-          # The action works on Windows too
           args: http 11470
         env:
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+          
+      - name: 🔗 Create Link in Job Summary
+        run: |
+          echo "### Stremio Server is Live! ✨" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Your Streaming Server URL is:**" >> $GITHUB_STEP_SUMMARY
+          echo "[${{ steps.ngrok.outputs.url }}](${{ steps.ngrok.outputs.url }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "*Copy this URL and paste it into your Stremio app's streaming settings.*" >> $GITHUB_STEP_SUMMARY
+          echo "*This server will remain active for up to 6 hours or until you cancel it.*" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Keep Runner Alive
+        # This step ensures the workflow doesn't exit, keeping the server online.
+        run: tail -f /dev/null
