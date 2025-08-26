@@ -1,44 +1,206 @@
-name: Build and Expose with ngrok
+name: Stremio Web Server with Ngrok
 
 on:
-  workflow_dispatch:
-  # The workflow_dispatch event allows you to manually trigger the workflow
-  # from the Actions tab in your repository. This is ideal for one-off debugging.
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches: [ main ]  # Or your preferred branch
 
 jobs:
-  expose_server:
-    runs-on: ubuntu-latest
-
+  stremio-server:
+    runs-on: windows-latest
+    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+    - name: Checkout repository
+      uses: actions/checkout@v3
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install Chocolatey packages
+      run: |
+        choco install wget -y
+        choco install unzip -y
+      shell: powershell
+
+    - name: Download and setup ngrok
+      run: |
+        # Download ngrok for Windows
+        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+        
+        # Extract ngrok
+        Expand-Archive -Path "ngrok.zip" -DestinationPath "." -Force
+        
+        # Add ngrok to PATH
+        echo "$pwd" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+        
+        # Verify ngrok installation
+        ./ngrok version
+      shell: powershell
+
+    - name: Configure ngrok authentication
+      env:
+        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+      run: |
+        ./ngrok config add-authtoken $env:NGROK_AUTH_TOKEN
+      shell: powershell
+
+    - name: Clone and setup Stremio Web
+      run: |
+        # Clone the Stremio Web repository
+        git clone https://github.com/Stremio/stremio-web.git
+        cd stremio-web
+        
+        # Install dependencies
+        npm install
+        
+        # Build the project (if needed)
+        npm run build --if-present
+      shell: powershell
+
+    - name: Start Stremio server in background
+      run: |
+        # Start the Stremio web server in the background
+        cd stremio-web
+        $job = Start-Job -ScriptBlock {
+          param($path)
+          Set-Location $path
+          npm start
+        } -ArgumentList (Get-Location).Path
+        
+        # Wait a bit for the server to start
+        Start-Sleep -Seconds 10
+        
+        # Check if server is running
+        try {
+          $response = Invoke-WebRequest -Uri "http://localhost:8080" -UseBasicParsing -TimeoutSec 5
+          Write-Host "Stremio server is running on port 8080"
+        } catch {
+          Write-Host "Stremio server might be running on a different port or needs more time to start"
+        }
+        
+        # Save job ID for later reference
+        $job.Id | Out-File -FilePath "server_job_id.txt"
+      shell: powershell
+
+    - name: Start ngrok tunnel
+      run: |
+        # Start ngrok tunnel in the background
+        $ngrokJob = Start-Job -ScriptBlock {
+          param($path)
+          Set-Location $path
+          ./ngrok http 8080 --log-level=info --log=stdout
+        } -ArgumentList (Get-Location).Path
+        
+        # Wait for ngrok to establish connection
+        Start-Sleep -Seconds 5
+        
+        # Get ngrok public URL using API
+        try {
+          $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -Method Get
+          $publicUrl = $response.tunnels[0].public_url
           
-      - name: Install dependencies
-        run: npm install
+          Write-Host "================================================"
+          Write-Host "🎬 Stremio Web Server is now accessible at:"
+          Write-Host "📍 $publicUrl"
+          Write-Host "================================================"
+          
+          # Save URL to file and environment variable
+          $publicUrl | Out-File -FilePath "ngrok_url.txt"
+          echo "STREMIO_URL=$publicUrl" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          
+          # Also output as GitHub Action output
+          echo "::notice title=Stremio Server URL::$publicUrl"
+          
+        } catch {
+          Write-Host "Could not retrieve ngrok URL automatically"
+          Write-Host "Check ngrok dashboard at: https://dashboard.ngrok.com/endpoints/status"
+        }
+        
+        # Save ngrok job ID
+        $ngrokJob.Id | Out-File -FilePath "ngrok_job_id.txt"
+      shell: powershell
 
-      - name: Build the web-stremio app
-        run: npm run build
+    - name: Display connection information
+      run: |
+        Write-Host "================================"
+        Write-Host "📺 STREMIO WEB SERVER STATUS"
+        Write-Host "================================"
+        
+        if (Test-Path "ngrok_url.txt") {
+          $url = Get-Content "ngrok_url.txt"
+          Write-Host "✅ Public URL: $url"
+          Write-Host ""
+          Write-Host "You can now access your Stremio server from anywhere!"
+          Write-Host "The server will remain active for the duration of this workflow run."
+        } else {
+          Write-Host "⚠️ Could not retrieve public URL automatically."
+          Write-Host "Check your ngrok dashboard for the tunnel URL."
+        }
+        
+        Write-Host ""
+        Write-Host "📝 Notes:"
+        Write-Host "- The free ngrok tier has limitations (1 concurrent tunnel, limited requests)"
+        Write-Host "- This session will timeout based on your GitHub Actions runner limits"
+        Write-Host "- Consider using ngrok paid tier for production use"
+      shell: powershell
 
-      # Start a simple web server to serve the build files
-      - name: Start web server
-        run: |
-          npm install -g serve
-          serve -l 3000 build &
-        # The '&' runs the command in the background
+    - name: Keep server running
+      run: |
+        Write-Host "Server is running. Keeping the workflow active for 6 hours or until cancelled..."
+        Write-Host "Press Ctrl+C in the GitHub Actions log to stop the server."
+        
+        # Keep the workflow running for 6 hours (GitHub Actions max)
+        # You can adjust this timeout as needed
+        $timeout = 6 * 60 * 60  # 6 hours in seconds
+        $elapsed = 0
+        $interval = 30  # Check every 30 seconds
+        
+        while ($elapsed -lt $timeout) {
+          Start-Sleep -Seconds $interval
+          $elapsed += $interval
+          
+          # Periodically output status to avoid GitHub Actions timeout
+          if ($elapsed % 300 -eq 0) {  # Every 5 minutes
+            $minutes = $elapsed / 60
+            Write-Host "⏱️ Server has been running for $minutes minutes..."
+            
+            # Check if services are still running
+            if (Test-Path "ngrok_url.txt") {
+              $url = Get-Content "ngrok_url.txt"
+              Write-Host "📍 Still accessible at: $url"
+            }
+          }
+        }
+        
+        Write-Host "⏰ Maximum runtime reached. Shutting down..."
+      shell: powershell
+      timeout-minutes: 360  # 6 hours
 
-      - name: Set up ngrok tunnel
-        uses: luisboto/ngrok-tunnel-action@v1.0.0
-        with:
-          port: 3000
-          ngrok_authtoken: ${{ secrets.NGROK_AUTHTOKEN }}
-          timeout: 5m
-      
-      - name: Wait for a few minutes
-        run: sleep 300
-        # The workflow will run for 5 minutes, giving you time to connect.
-        # This is a temporary solution for debugging purposes.
+    - name: Cleanup on failure or completion
+      if: always()
+      run: |
+        Write-Host "Cleaning up processes..."
+        
+        # Stop the server job if it exists
+        if (Test-Path "server_job_id.txt") {
+          $jobId = Get-Content "server_job_id.txt"
+          Stop-Job -Id $jobId -ErrorAction SilentlyContinue
+          Remove-Job -Id $jobId -ErrorAction SilentlyContinue
+        }
+        
+        # Stop the ngrok job if it exists
+        if (Test-Path "ngrok_job_id.txt") {
+          $jobId = Get-Content "ngrok_job_id.txt"
+          Stop-Job -Id $jobId -ErrorAction SilentlyContinue
+          Remove-Job -Id $jobId -ErrorAction SilentlyContinue
+        }
+        
+        # Kill any remaining node or ngrok processes
+        Get-Process -Name "node" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        
+        Write-Host "Cleanup completed."
+      shell: powershell
