@@ -7,26 +7,49 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360  # keep alive up to 6h
     steps:
-      - name: Install microsocks and tools
+      - name: Install dependencies (microsocks, unzip, jq, curl)
         run: |
           sudo apt-get update
-          sudo apt-get install -y microsocks jq
+          sudo apt-get install -y microsocks unzip jq curl
+
+      - name: Download and install ngrok (zip + unzip)
+        run: |
+          set -euxo pipefail
+          # Download ngrok zip (Linux x86_64). If this URL ever changes, replace with the current Linux zip URL from ngrok downloads.
+          NGROK_ZIP_URL="https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip"
+          curl -L "$NGROK_ZIP_URL" -o ngrok.zip
+          unzip -o ngrok.zip
+          sudo install -m 0755 ngrok /usr/local/bin/ngrok
+          ngrok version || true
 
       - name: Start microsocks (SOCKS5 on 127.0.0.1:1080, no auth)
         run: |
-          # Bind to loopback; tunnel will be the only ingress
           nohup microsocks -i 127.0.0.1 -p 1080 > microsocks.log 2>&1 &
           sleep 2
           ss -lntp || true
 
+      - name: Configure ngrok authtoken
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          # For ngrok v2 CLI syntax; if using v3, replace with: ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+          ngrok authtoken "$NGROK_AUTHTOKEN"
+
       - name: Start ngrok TCP tunnel to port 1080
-        uses: luisboto/ngrok-tunnel-action@v3
-        with:
-          timeout: 6h
-          port: 1080
-          tunnel_type: tcp
-          ngrok_authtoken: ${{ secrets.NGROK_AUTHTOKEN }}
-          save_url_to_filename: tunnel_url.txt
+        run: |
+          # Run ngrok in background; expose TCP tunnel to local 1080
+          nohup ngrok tcp 1080 --log=stdout > ngrok.log 2>&1 &
+          # Wait for API to be ready and extract public tcp URL
+          for i in {1..30}; do
+            sleep 2
+            URL=$(curl -fsS http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[]? | select(.proto=="tcp") | .public_url' | head -n1 || true)
+            if [ -n "${URL:-}" ] && [ "$URL" != "null" ]; then
+              echo "$URL" > tunnel_url.txt
+              break
+            fi
+          done
+          echo "Discovered tunnel URL: $(cat tunnel_url.txt || echo 'NOT FOUND')"
+          test -s tunnel_url.txt
 
       - name: Show connection info
         id: info
@@ -34,6 +57,7 @@ jobs:
           TUNNEL_URL="$(cat tunnel_url.txt)"
           echo "tunnel_url=$TUNNEL_URL" >> "$GITHUB_OUTPUT"
           echo "SOCKS5 endpoint (no auth): $TUNNEL_URL"
+          echo "Connect with: socks5://HOST:PORT  (replace with the tcp host:port above)"
 
       - name: Keep job alive
         run: sleep 6h
