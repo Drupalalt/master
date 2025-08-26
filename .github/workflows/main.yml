@@ -1,65 +1,44 @@
-name: Host Stremio Server (From Scratch - Fixed Path)
+name: Build and Expose with ngrok
 
 on:
   workflow_dispatch:
+  # The workflow_dispatch event allows you to manually trigger the workflow
+  # from the Actions tab in your repository. This is ideal for one-off debugging.
 
 jobs:
-  build:
-    runs-on: windows-latest
+  expose_server:
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Install and Run Stremio Server
-        shell: pwsh
-        run: |
-          echo "Installing Stremio Server CLI..."
-          npm install -g @stremio/server-cli
-          
-          # FIX: Get the full path to the installed executable
-          echo "Finding npm global installation path..."
-          $npmPrefix = npm prefix -g
-          $stremioPath = Join-Path $npmPrefix "stremio-server.cmd"
-          
-          echo "Starting Stremio Server from: $stremioPath"
-          Start-Process -FilePath $stremioPath
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      - name: Download and Prepare ngrok
-        shell: pwsh
-        run: |
-          echo "Downloading ngrok..."
-          Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
           
-          echo "Extracting ngrok..."
-          Expand-Archive ngrok.zip
-          
-      - name: Authenticate ngrok
-        shell: pwsh
-        run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
-        env:
-          # You still need to set this secret in your repository settings
-          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-          
-      - name: Start ngrok Tunnel in Background
-        shell: pwsh
-        run: |
-          Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "http", "11470"
+      - name: Install dependencies
+        run: npm install
 
-      - name: 🔗 Get Link and Create Job Summary
-        shell: pwsh
-        run: |
-          # Wait for ngrok's local API to become available
-          Start-Sleep -Seconds 10
-          
-          # Query the ngrok API to get the public URL
-          $tunnels = Invoke-RestMethod -Uri http://127.0.0.1:4040/api/tunnels
-          $publicUrl = ($tunnels.tunnels | Where-Object { $_.proto -eq 'https' }).public_url
-          
-          # Write the link to the Job Summary page for easy access
-          echo "### Stremio Server is Live! ✨" >> $env:GITHUB_STEP_SUMMARY
-          echo "" >> $env:GITHUB_STEP_SUMMARY
-          echo "**Your Streaming Server URL is:**" >> $env:GITHUB_STEP_SUMMARY
-          echo "[$publicUrl]($publicUrl)" >> $env:GITHUB_STEP_SUMMARY
-          echo "" >> $env:GITHUB_STEP_SUMMARY
-          echo "*This server will remain active for up to 6 hours.*" >> $env:GITHUB_STEP_SUMMARY
+      - name: Build the web-stremio app
+        run: npm run build
 
-      - name: Keep Runner Alive
-        shell: pwsh
-        run: Start-Sleep -Seconds 21600 # Keep alive for 6 hours
+      # Start a simple web server to serve the build files
+      - name: Start web server
+        run: |
+          npm install -g serve
+          serve -l 3000 build &
+        # The '&' runs the command in the background
+
+      - name: Set up ngrok tunnel
+        uses: luisboto/ngrok-tunnel-action@v1.0.0
+        with:
+          port: 3000
+          ngrok_authtoken: ${{ secrets.NGROK_AUTHTOKEN }}
+          timeout: 5m
+      
+      - name: Wait for a few minutes
+        run: sleep 300
+        # The workflow will run for 5 minutes, giving you time to connect.
+        # This is a temporary solution for debugging purposes.
