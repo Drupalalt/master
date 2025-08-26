@@ -17,7 +17,7 @@ jobs:
       uses: actions/setup-node@v3
       with:
         node-version: '18'
-        cache: 'npm'
+        # Don't cache here since package files are in subdirectory
 
     - name: Install Chocolatey packages
       run: |
@@ -53,11 +53,11 @@ jobs:
         git clone https://github.com/Stremio/stremio-web.git
         cd stremio-web
         
-        # Install dependencies
-        npm install
+        # Install dependencies with proper error handling
+        npm ci --prefer-offline --no-audit
         
-        # Build the project (if needed)
-        npm run build --if-present
+        # Build the project
+        npm run build
       shell: powershell
 
     - name: Start Stremio server in background
@@ -70,38 +70,74 @@ jobs:
           npm start
         } -ArgumentList (Get-Location).Path
         
-        # Wait a bit for the server to start
-        Start-Sleep -Seconds 10
+        # Wait for the server to start
+        Start-Sleep -Seconds 15
         
-        # Check if server is running
-        try {
-          $response = Invoke-WebRequest -Uri "http://localhost:8080" -UseBasicParsing -TimeoutSec 5
-          Write-Host "Stremio server is running on port 8080"
-        } catch {
-          Write-Host "Stremio server might be running on a different port or needs more time to start"
+        # Check if server is running on common ports
+        $ports = @(8080, 3000, 8081, 11470)
+        $serverPort = $null
+        
+        foreach ($port in $ports) {
+          try {
+            $response = Invoke-WebRequest -Uri "http://localhost:$port" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+            Write-Host "✅ Stremio server is running on port $port"
+            $serverPort = $port
+            break
+          } catch {
+            Write-Host "Port $port not responding, trying next..."
+          }
         }
         
-        # Save job ID for later reference
+        if (-not $serverPort) {
+          Write-Host "❌ Could not detect server port. Server might need more time to start."
+          $serverPort = 11470  # Default Stremio port
+        }
+        
+        # Save job ID and port for later reference
         $job.Id | Out-File -FilePath "server_job_id.txt"
+        $serverPort | Out-File -FilePath "server_port.txt"
       shell: powershell
 
     - name: Start ngrok tunnel
       run: |
+        # Get the server port
+        $serverPort = if (Test-Path "server_port.txt") { 
+          Get-Content "server_port.txt" 
+        } else { 
+          11470 
+        }
+        
+        Write-Host "Starting ngrok tunnel for port $serverPort"
+        
         # Start ngrok tunnel in the background
         $ngrokJob = Start-Job -ScriptBlock {
-          param($path)
+          param($path, $port)
           Set-Location $path
-          ./ngrok http 8080 --log-level=info --log=stdout
-        } -ArgumentList (Get-Location).Path
+          ./ngrok http $port --log-level=info --log=stdout
+        } -ArgumentList (Get-Location).Path, $serverPort
         
         # Wait for ngrok to establish connection
-        Start-Sleep -Seconds 5
+        Start-Sleep -Seconds 8
         
         # Get ngrok public URL using API
-        try {
-          $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -Method Get
-          $publicUrl = $response.tunnels[0].public_url
-          
+        $maxRetries = 5
+        $retry = 0
+        $publicUrl = $null
+        
+        while ($retry -lt $maxRetries -and -not $publicUrl) {
+          try {
+            $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -Method Get -TimeoutSec 10
+            if ($response.tunnels -and $response.tunnels.Count -gt 0) {
+              $publicUrl = $response.tunnels[0].public_url
+            }
+          } catch {
+            $retry++
+            Write-Host "Retry $retry/$maxRetries - waiting for ngrok..."
+            Start-Sleep -Seconds 3
+          }
+        }
+        
+        if ($publicUrl) {
           Write-Host "================================================"
           Write-Host "🎬 Stremio Web Server is now accessible at:"
           Write-Host "📍 $publicUrl"
@@ -111,11 +147,10 @@ jobs:
           $publicUrl | Out-File -FilePath "ngrok_url.txt"
           echo "STREMIO_URL=$publicUrl" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
           
-          # Also output as GitHub Action output
+          # Output as GitHub Action notice
           echo "::notice title=Stremio Server URL::$publicUrl"
-          
-        } catch {
-          Write-Host "Could not retrieve ngrok URL automatically"
+        } else {
+          Write-Host "❌ Could not retrieve ngrok URL automatically"
           Write-Host "Check ngrok dashboard at: https://dashboard.ngrok.com/endpoints/status"
         }
         
@@ -123,6 +158,7 @@ jobs:
         $ngrokJob.Id | Out-File -FilePath "ngrok_job_id.txt"
       shell: powershell
 
+    # Rest of your workflow steps remain the same...
     - name: Display connection information
       run: |
         Write-Host "================================"
@@ -153,7 +189,6 @@ jobs:
         Write-Host "Press Ctrl+C in the GitHub Actions log to stop the server."
         
         # Keep the workflow running for 6 hours (GitHub Actions max)
-        # You can adjust this timeout as needed
         $timeout = 6 * 60 * 60  # 6 hours in seconds
         $elapsed = 0
         $interval = 30  # Check every 30 seconds
