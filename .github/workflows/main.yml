@@ -1,241 +1,39 @@
-name: Stremio Web Server with Ngrok
-
+name: socks5-ngrok-no-auth
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
 
 jobs:
-  stremio-server:
-    runs-on: windows-latest
-    
+  proxy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # keep alive up to 6h
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Install microsocks and tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y microsocks jq
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: '18'
+      - name: Start microsocks (SOCKS5 on 127.0.0.1:1080, no auth)
+        run: |
+          # Bind to loopback; tunnel will be the only ingress
+          nohup microsocks -i 127.0.0.1 -p 1080 > microsocks.log 2>&1 &
+          sleep 2
+          ss -lntp || true
 
-    - name: Download and setup ngrok
-      run: |
-        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
-        Expand-Archive -Path "ngrok.zip" -DestinationPath "." -Force
-        echo "$pwd" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
-        ./ngrok version
-      shell: powershell
+      - name: Start ngrok TCP tunnel to port 1080
+        uses: luisboto/ngrok-tunnel-action@v3
+        with:
+          timeout: 6h
+          port: 1080
+          tunnel_type: tcp
+          ngrok_authtoken: ${{ secrets.NGROK_AUTHTOKEN }}
+          save_url_to_filename: tunnel_url.txt
 
-    - name: Configure ngrok authentication
-      env:
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-      run: |
-        ./ngrok config add-authtoken $env:NGROK_AUTH_TOKEN
-      shell: powershell
+      - name: Show connection info
+        id: info
+        run: |
+          TUNNEL_URL="$(cat tunnel_url.txt)"
+          echo "tunnel_url=$TUNNEL_URL" >> "$GITHUB_OUTPUT"
+          echo "SOCKS5 endpoint (no auth): $TUNNEL_URL"
 
-    - name: Clone and build Stremio Web
-      run: |
-        git clone https://github.com/Stremio/stremio-web.git
-        cd stremio-web
-        npm ci --prefer-offline --no-audit
-        npm run build
-        
-        Write-Host "✅ Stremio Web built successfully"
-      shell: powershell
-
-    - name: Start Stremio server in foreground with output capture
-      run: |
-        cd stremio-web
-        
-        # Start server and capture output
-        Write-Host "🚀 Starting Stremio server on port 8080..."
-        
-        # Use Start-Process instead of Start-Job for better control
-        $process = Start-Process -FilePath "npm" -ArgumentList "start" -PassThru -NoNewWindow -RedirectStandardOutput "server.log" -RedirectStandardError "server_error.log"
-        
-        Write-Host "Server process started with PID: $($process.Id)"
-        $process.Id | Out-File -FilePath "server_pid.txt"
-        
-        # Wait longer for server to start
-        Write-Host "Waiting for server to start..."
-        Start-Sleep -Seconds 20
-        
-        # Check server logs
-        if (Test-Path "server.log") {
-          Write-Host "=== Server Output ==="
-          Get-Content "server.log" -ErrorAction SilentlyContinue
-        }
-        
-        if (Test-Path "server_error.log") {
-          Write-Host "=== Server Errors ==="
-          Get-Content "server_error.log" -ErrorAction SilentlyContinue
-        }
-        
-        # Test multiple ports to find where it's actually running
-        $testPorts = @(8080, 3000, 8081, 5000, 3001)
-        $foundPort = $null
-        
-        foreach ($port in $testPorts) {
-          try {
-            Write-Host "Testing port $port..."
-            $response = Invoke-WebRequest -Uri "http://localhost:$port" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
-            Write-Host "✅ Server responding on port $port"
-            $foundPort = $port
-            break
-          } catch {
-            Write-Host "❌ Port $port not responding"
-          }
-        }
-        
-        if ($foundPort) {
-          $foundPort | Out-File -FilePath "server_port.txt"
-          Write-Host "🎯 Server confirmed running on port $foundPort"
-        } else {
-          Write-Host "⚠️ Server not responding on any tested ports"
-          Write-Host "Checking if process is still running..."
-          if ($process -and !$process.HasExited) {
-            Write-Host "✅ Process is still running, server might need more time"
-            "8080" | Out-File -FilePath "server_port.txt"  # Default assumption
-          } else {
-            Write-Host "❌ Process has exited"
-            exit 1
-          }
-        }
-      shell: powershell
-
-    - name: Start ngrok tunnel
-      run: |
-        $serverPort = if (Test-Path "server_port.txt") { 
-          Get-Content "server_port.txt" 
-        } else { 
-          8080 
-        }
-        
-        Write-Host "Starting ngrok tunnel for port $serverPort"
-        
-        # Start ngrok in background
-        $ngrokProcess = Start-Process -FilePath "./ngrok" -ArgumentList "http", $serverPort, "--log-level=info" -PassThru -NoNewWindow -RedirectStandardOutput "ngrok.log"
-        $ngrokProcess.Id | Out-File -FilePath "ngrok_pid.txt"
-        
-        Start-Sleep -Seconds 10
-        
-        # Get ngrok URL
-        $maxRetries = 6
-        $retry = 0
-        $publicUrl = $null
-        
-        while ($retry -lt $maxRetries -and -not $publicUrl) {
-          try {
-            $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -Method Get -TimeoutSec 5
-            if ($response.tunnels -and $response.tunnels.Count -gt 0) {
-              $publicUrl = $response.tunnels[0].public_url
-            }
-          } catch {
-            $retry++
-            Write-Host "Retry $retry/$maxRetries - waiting for ngrok..."
-            Start-Sleep -Seconds 5
-          }
-        }
-        
-        if ($publicUrl) {
-          Write-Host "================================================"
-          Write-Host "🎬 Stremio Web Server is accessible at:"
-          Write-Host "📍 $publicUrl"
-          Write-Host "================================================"
-          
-          $publicUrl | Out-File -FilePath "ngrok_url.txt"
-          echo "STREMIO_URL=$publicUrl" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
-          echo "::notice title=Stremio URL::$publicUrl"
-        } else {
-          # Check ngrok logs
-          if (Test-Path "ngrok.log") {
-            Write-Host "=== Ngrok Logs ==="
-            Get-Content "ngrok.log" -ErrorAction SilentlyContinue
-          }
-          Write-Host "❌ Could not retrieve ngrok URL"
-        }
-      shell: powershell
-
-    - name: Display connection info and keep running
-      run: |
-        Write-Host "================================"
-        Write-Host "📺 STREMIO WEB SERVER STATUS"
-        Write-Host "================================"
-        
-        if (Test-Path "ngrok_url.txt") {
-          $url = Get-Content "ngrok_url.txt"
-          Write-Host "✅ Public URL: $url"
-          Write-Host ""
-          Write-Host "🌐 Access your Stremio server from anywhere!"
-        }
-        
-        Write-Host "⏱️ Keeping server running for 6 hours..."
-        
-        # Keep running and monitor
-        $timeout = 6 * 60 * 60  # 6 hours
-        $elapsed = 0
-        $interval = 60  # Check every minute
-        
-        while ($elapsed -lt $timeout) {
-          Start-Sleep -Seconds $interval
-          $elapsed += $interval
-          
-          # Check every 5 minutes
-          if ($elapsed % 300 -eq 0) {
-            $minutes = $elapsed / 60
-            Write-Host "⏱️ Running for $minutes minutes..."
-            
-            # Verify server is still responding
-            $serverPort = if (Test-Path "server_port.txt") { Get-Content "server_port.txt" } else { 8080 }
-            try {
-              $response = Invoke-WebRequest -Uri "http://localhost:$serverPort" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-              Write-Host "✅ Server still responding"
-            } catch {
-              Write-Host "⚠️ Server not responding, checking process..."
-              
-              if (Test-Path "server_pid.txt") {
-                $pid = Get-Content "server_pid.txt"
-                $process = Get-Process -Id $pid -ErrorAction SilentlyContinue
-                if ($process) {
-                  Write-Host "✅ Process still running"
-                } else {
-                  Write-Host "❌ Process died, exiting..."
-                  break
-                }
-              }
-            }
-            
-            if (Test-Path "ngrok_url.txt") {
-              $url = Get-Content "ngrok_url.txt"
-              Write-Host "📍 Still accessible at: $url"
-            }
-          }
-        }
-      shell: powershell
-      timeout-minutes: 360
-
-    - name: Cleanup
-      if: always()
-      run: |
-        Write-Host "Cleaning up processes..."
-        
-        # Kill server process
-        if (Test-Path "server_pid.txt") {
-          $pid = Get-Content "server_pid.txt"
-          Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
-          Write-Host "Server process stopped"
-        }
-        
-        # Kill ngrok process
-        if (Test-Path "ngrok_pid.txt") {
-          $pid = Get-Content "ngrok_pid.txt"
-          Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
-          Write-Host "Ngrok process stopped"
-        }
-        
-        # Cleanup any remaining processes
-        Get-Process -Name "node" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        
-        Write-Host "✅ Cleanup completed"
-      shell: powershell
+      - name: Keep job alive
+        run: sleep 6h
