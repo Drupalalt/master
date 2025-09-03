@@ -161,7 +161,7 @@ jobs:
           echo "🔗 Establishing tunnel (this may take 10-15 seconds)..."
           
           # Start the TCP tunnel to our SOCKS proxy
-          timeout ${DURATION}m cloudflared tunnel --tcp-tunnel localhost:$PORT 2>&1 | tee "$TUNNEL_LOG" &
+          timeout ${DURATION}m cloudflared tunnel --url localhost:$PORT 2>&1 | tee "$TUNNEL_LOG" &
           TUNNEL_PID=$!
           
           echo "🚇 Tunnel process started with PID: $TUNNEL_PID"
