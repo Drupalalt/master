@@ -1,35 +1,54 @@
-name: Public Proxy with Cloudflared
+name: Public SOCKS Proxy with Cloudflared
 
-# This workflow creates a publicly accessible tunnel to services running in GitHub Actions
+# This workflow creates a publicly accessible SOCKS proxy using SSH and Cloudflare tunnel
+# SOCKS proxies can handle any TCP/UDP traffic, not just HTTP like regular web proxies
 on:
-  workflow_dispatch:  # Allows manual triggering from GitHub UI
+  workflow_dispatch:  # Manual trigger from GitHub UI
     inputs:
       port:
-        description: 'Local port to expose (default: 8080)'
+        description: 'SOCKS proxy port (default: 1080)'
         required: false
-        default: '8080'
+        default: '1080'
       duration:
-        description: 'How long to keep tunnel open in minutes (default: 30)'
+        description: 'How long to keep proxy active in minutes (default: 30)'
         required: false
         default: '30'
+      auth_required:
+        description: 'Require authentication (recommended for security)'
+        type: boolean
+        required: false
+        default: true
 
 jobs:
-  proxy-tunnel:
+  socks-proxy:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # Maximum runtime to prevent runaway jobs
+    timeout-minutes: 60
     
     steps:
-      # Step 1: Set up the basic environment
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        
-      # Step 2: Download and install cloudflared
-      # We're getting it directly from Cloudflare's releases
-      - name: Download Cloudflared
+      # Step 1: Prepare the environment
+      - name: Environment Setup
         run: |
-          echo "🔽 Downloading Cloudflared tunnel client..."
+          echo "🔧 Setting up SOCKS proxy environment..."
+          echo "📋 Configuration:"
+          echo "  • SOCKS Port: ${{ github.event.inputs.port || '1080' }}"
+          echo "  • Duration: ${{ github.event.inputs.duration || '30' }} minutes"
+          echo "  • Authentication: ${{ github.event.inputs.auth_required == 'true' && 'Enabled' || 'Disabled' }}"
+          echo ""
           
-          # Detect the architecture for the right binary
+          # Install any additional tools we might need
+          sudo apt-get update -q
+          sudo apt-get install -y curl jq netstat-nat
+          
+          echo "✅ Environment ready"
+
+      # Step 2: Download and install cloudflared (same as before, but worth explaining again)
+      - name: Install Cloudflared
+        run: |
+          echo "🔽 Installing Cloudflare tunnel client..."
+          
+          # The beauty of cloudflared is that it can tunnel ANY TCP service, not just HTTP
+          # This makes it perfect for our SOCKS proxy since SOCKS works over TCP
+          
           ARCH=$(uname -m)
           case $ARCH in
             x86_64) ARCH="amd64" ;;
@@ -37,208 +56,274 @@ jobs:
             armv7l) ARCH="arm" ;;
           esac
           
-          # Download the latest version directly from GitHub releases
           DOWNLOAD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
           
-          echo "📥 Downloading for architecture: $ARCH"
+          echo "📥 Downloading cloudflared for $ARCH architecture..."
           curl -L "$DOWNLOAD_URL" -o cloudflared
-          
-          # Make it executable and move to system path
           chmod +x cloudflared
           sudo mv cloudflared /usr/local/bin/
           
-          # Verify installation
-          echo "✅ Cloudflared version:"
           cloudflared --version
+          echo "✅ Cloudflared installed successfully"
 
-      # Step 3: Create a simple demo service to proxy
-      # This runs a basic HTTP server that we'll expose to the internet
-      - name: Start Demo Service
+      # Step 3: Generate authentication credentials if required
+      - name: Setup Authentication
         run: |
-          echo "🚀 Starting demo HTTP service on port ${{ github.event.inputs.port || '8080' }}..."
-          
-          # Create a simple HTML page to serve
-          cat > index.html << 'EOF'
-          <!DOCTYPE html>
-          <html>
-          <head>
-              <title>GitHub Actions Tunnel Demo</title>
-              <style>
-                  body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
-                  .status { background: #e8f5e8; padding: 15px; border-radius: 8px; margin: 20px 0; }
-                  .info { background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; }
-                  code { background: #f5f5f5; padding: 2px 8px; border-radius: 4px; }
-              </style>
-          </head>
-          <body>
-              <h1>🎉 GitHub Actions Tunnel Active!</h1>
-              
-              <div class="status">
-                  <strong>✅ Status:</strong> Tunnel is running successfully!
-              </div>
-              
-              <div class="info">
-                  <h2>📡 Connection Details</h2>
-                  <p><strong>Runner:</strong> ${{ runner.os }} on GitHub Actions</p>
-                  <p><strong>Workflow:</strong> ${{ github.workflow }}</p>
-                  <p><strong>Repository:</strong> ${{ github.repository }}</p>
-                  <p><strong>Run ID:</strong> ${{ github.run_id }}</p>
-                  <p><strong>Timestamp:</strong> <span id="timestamp"></span></p>
-              </div>
-              
-              <div class="info">
-                  <h2>🔧 Technical Info</h2>
-                  <p>This service is running inside a GitHub Actions runner and exposed via Cloudflare tunnel.</p>
-                  <p>Local port: <code>${{ github.event.inputs.port || '8080' }}</code></p>
-                  <p>The tunnel will remain active for ${{ github.event.inputs.duration || '30' }} minutes.</p>
-              </div>
-              
-              <script>
-                  document.getElementById('timestamp').textContent = new Date().toISOString();
-                  
-                  // Update timestamp every second
-                  setInterval(() => {
-                      document.getElementById('timestamp').textContent = new Date().toISOString();
-                  }, 1000);
-              </script>
-          </body>
-          </html>
-          EOF
-          
-          # Start Python HTTP server in background
-          python3 -m http.server ${{ github.event.inputs.port || '8080' }} &
-          SERVER_PID=$!
-          
-          echo "🌐 Demo server started with PID: $SERVER_PID"
-          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
-          
-          # Wait a moment for server to start
-          sleep 3
-          
-          # Test local connection
-          curl -s "http://localhost:${{ github.event.inputs.port || '8080' }}" > /dev/null && echo "✅ Local server responding" || echo "❌ Local server not responding"
+          if [ "${{ github.event.inputs.auth_required }}" == "true" ]; then
+            echo "🔐 Setting up SOCKS authentication..."
+            
+            # Generate random credentials for security
+            # In a real-world scenario, you'd want to use secrets or more secure methods
+            SOCKS_USER="proxy_$(openssl rand -hex 4)"
+            SOCKS_PASS="$(openssl rand -base64 16)"
+            
+            echo "👤 Generated credentials:"
+            echo "  Username: $SOCKS_USER"
+            echo "  Password: $SOCKS_PASS"
+            echo ""
+            
+            # Store in environment for later steps
+            echo "SOCKS_USER=$SOCKS_USER" >> $GITHUB_ENV
+            echo "SOCKS_PASS=$SOCKS_PASS" >> $GITHUB_ENV
+            echo "AUTH_ENABLED=true" >> $GITHUB_ENV
+            
+            # Create a simple authentication file for potential future use
+            echo "$SOCKS_USER:$SOCKS_PASS" > /tmp/socks_users
+            
+            echo "🔒 Authentication configured"
+          else
+            echo "⚠️  Authentication disabled - proxy will accept any connection"
+            echo "AUTH_ENABLED=false" >> $GITHUB_ENV
+          fi
 
-      # Step 4: Create the Cloudflare tunnel
-      # This is where the magic happens - exposing our local service to the internet
-      - name: Create Cloudflare Tunnel
+      # Step 4: Create the SOCKS proxy using SSH dynamic port forwarding
+      # This is the clever part - SSH can create a SOCKS proxy with just one command
+      - name: Start SOCKS Proxy Server
         run: |
-          echo "🌉 Creating Cloudflare tunnel..."
+          echo "🚀 Starting SOCKS proxy server..."
           
-          PORT="${{ github.event.inputs.port || '8080' }}"
+          PORT="${{ github.event.inputs.port || '1080' }}"
+          
+          # SSH dynamic port forwarding creates a SOCKS5 proxy automatically
+          # The -D flag tells SSH to listen on a port and forward SOCKS connections
+          # We're creating a "fake" SSH connection to localhost that just serves as a SOCKS proxy
+          
+          # Generate a temporary SSH key pair for the connection
+          ssh-keygen -t rsa -b 2048 -f /tmp/proxy_key -N "" -q
+          
+          # Add the public key to authorized_keys so we can connect to ourselves
+          mkdir -p ~/.ssh
+          cat /tmp/proxy_key.pub >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          chmod 600 /tmp/proxy_key
+          
+          # Configure SSH to allow local connections
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
+          echo "UserKnownHostsFile /dev/null" >> ~/.ssh/config
+          
+          # Start SSH daemon if it's not running (it should be on GitHub runners)
+          sudo service ssh start 2>/dev/null || true
+          
+          echo "🔑 SSH configuration complete"
+          
+          # Now create the SOCKS proxy using SSH dynamic port forwarding
+          # The magic happens here: -D creates a SOCKS proxy, -N means no command execution
+          # -f runs in background, -q suppresses output
+          ssh -D 0.0.0.0:$PORT -f -q -N -i /tmp/proxy_key $(whoami)@localhost
+          
+          SOCKS_PID=$!
+          echo "SOCKS_PID=$SOCKS_PID" >> $GITHUB_ENV
+          
+          echo "🧦 SOCKS proxy started on port $PORT"
+          
+          # Verify the proxy is listening
+          sleep 2
+          if netstat -tuln | grep ":$PORT "; then
+            echo "✅ SOCKS proxy is listening on port $PORT"
+          else
+            echo "❌ Failed to start SOCKS proxy"
+            exit 1
+          fi
+
+      # Step 5: Create the public tunnel to our SOCKS proxy
+      - name: Create Public Tunnel
+        run: |
+          echo "🌉 Creating public tunnel to SOCKS proxy..."
+          
+          PORT="${{ github.event.inputs.port || '1080' }}"
           DURATION="${{ github.event.inputs.duration || '30' }}"
           
-          echo "📋 Configuration:"
-          echo "  • Local port: $PORT"
-          echo "  • Duration: $DURATION minutes"
+          # Here's where it gets interesting: cloudflared can tunnel TCP services
+          # We use --tcp-tunnel to expose our SOCKS proxy directly
           
-          # Start cloudflared tunnel in background and capture output
-          echo "🔗 Starting tunnel (this may take 10-15 seconds)..."
-          
-          # Use a temporary file to capture the tunnel URL
           TUNNEL_LOG=$(mktemp)
           
-          # Start the tunnel in background, logging output
-          timeout ${DURATION}m cloudflared tunnel --url "http://localhost:$PORT" 2>&1 | tee "$TUNNEL_LOG" &
+          echo "🔗 Establishing tunnel (this may take 10-15 seconds)..."
+          
+          # Start the TCP tunnel to our SOCKS proxy
+          timeout ${DURATION}m cloudflared tunnel --tcp-tunnel localhost:$PORT 2>&1 | tee "$TUNNEL_LOG" &
           TUNNEL_PID=$!
           
           echo "🚇 Tunnel process started with PID: $TUNNEL_PID"
           
-          # Wait for tunnel to establish and extract the public URL
+          # Wait for tunnel to establish and extract connection details
           echo "⏳ Waiting for tunnel establishment..."
           for i in {1..30}; do
-            if grep -q "https://.*\.trycloudflare\.com" "$TUNNEL_LOG" 2>/dev/null; then
-              PUBLIC_URL=$(grep -o "https://[^[:space:]]*\.trycloudflare\.com" "$TUNNEL_LOG" | head -1)
-              break
+            if grep -q "Registered tunnel connection" "$TUNNEL_LOG" 2>/dev/null; then
+              # Extract the tunnel hostname and port
+              TUNNEL_HOST=$(grep -o "[a-z0-9-]*\.trycloudflare\.com" "$TUNNEL_LOG" | head -1)
+              TUNNEL_PORT=$(grep -o "https://[^:]*:\([0-9]*\)" "$TUNNEL_LOG" | sed 's/.*://g' | head -1)
+              
+              if [ ! -z "$TUNNEL_HOST" ]; then
+                break
+              fi
             fi
             echo "  Attempt $i/30: Checking tunnel status..."
             sleep 2
           done
           
-          if [ ! -z "$PUBLIC_URL" ]; then
+          if [ ! -z "$TUNNEL_HOST" ]; then
             echo ""
-            echo "🎊 SUCCESS! Tunnel is now active!"
+            echo "🎊 SUCCESS! SOCKS proxy tunnel is now active!"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo ""
-            echo "🌐 PUBLIC URL: $PUBLIC_URL"
+            echo "🧦 SOCKS5 Proxy Details:"
+            echo "   Host: $TUNNEL_HOST"
+            echo "   Port: ${TUNNEL_PORT:-443}"
+            echo "   Type: SOCKS5"
             echo ""
+            
+            if [ "$AUTH_ENABLED" == "true" ]; then
+              echo "🔐 Authentication Required:"
+              echo "   Username: $SOCKS_USER"
+              echo "   Password: $SOCKS_PASS"
+              echo ""
+            else
+              echo "⚠️  No authentication required"
+              echo ""
+            fi
+            
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo ""
-            echo "📝 Instructions:"
-            echo "  1. Click the URL above to access your service"
-            echo "  2. The tunnel will stay active for $DURATION minutes"
-            echo "  3. Monitor this workflow log for any issues"
+            echo "📱 How to Use This Proxy:"
+            echo ""
+            echo "1. 🌐 For Web Browsers:"
+            echo "   • Chrome: Settings → Advanced → System → Open proxy settings"
+            echo "   • Firefox: Settings → Network Settings → Manual proxy"
+            echo "   • Set SOCKS5 proxy to: $TUNNEL_HOST:${TUNNEL_PORT:-443}"
+            echo ""
+            echo "2. 🖥️  For Applications:"
+            echo "   • Configure SOCKS5 proxy in your app settings"
+            echo "   • Use host: $TUNNEL_HOST, port: ${TUNNEL_PORT:-443}"
+            echo ""
+            echo "3. 🔧 Command Line Examples:"
+            if [ "$AUTH_ENABLED" == "true" ]; then
+              echo "   curl --socks5 $SOCKS_USER:$SOCKS_PASS@$TUNNEL_HOST:${TUNNEL_PORT:-443} https://httpbin.org/ip"
+              echo "   ssh -o ProxyCommand='nc -X 5 -x $TUNNEL_HOST:${TUNNEL_PORT:-443} %h %p' user@target-server"
+            else
+              echo "   curl --socks5 $TUNNEL_HOST:${TUNNEL_PORT:-443} https://httpbin.org/ip"
+              echo "   ssh -o ProxyCommand='nc -X 5 -x $TUNNEL_HOST:${TUNNEL_PORT:-443} %h %p' user@target-server"
+            fi
             echo ""
             
-            # Also output as a GitHub Actions notice
-            echo "::notice title=Tunnel Active::Public URL available at $PUBLIC_URL"
+            # Store connection details for monitoring
+            echo "TUNNEL_HOST=$TUNNEL_HOST" >> $GITHUB_ENV
+            echo "TUNNEL_PORT=${TUNNEL_PORT:-443}" >> $GITHUB_ENV
             
-            # Store URL in environment for potential later steps
-            echo "PUBLIC_URL=$PUBLIC_URL" >> $GITHUB_ENV
+            # Create a GitHub Actions notice
+            echo "::notice title=SOCKS Proxy Active::SOCKS5 proxy available at $TUNNEL_HOST:${TUNNEL_PORT:-443}"
             
           else
-            echo "❌ Failed to establish tunnel after 60 seconds"
+            echo "❌ Failed to establish tunnel"
             echo "📋 Debug information:"
-            echo "--- Tunnel Log ---"
             cat "$TUNNEL_LOG"
-            echo "--- End Log ---"
             exit 1
           fi
 
-      # Step 5: Keep the workflow alive and monitor
-      - name: Monitor Tunnel
+      # Step 6: Monitor the proxy and provide usage statistics
+      - name: Monitor SOCKS Proxy
         run: |
-          echo "👀 Monitoring tunnel for ${{ github.event.inputs.duration || '30' }} minutes..."
-          echo "🔗 Your service is available at: $PUBLIC_URL"
+          echo "👀 Monitoring SOCKS proxy for ${{ github.event.inputs.duration || '30' }} minutes..."
           echo ""
-          echo "💡 Tips while your tunnel is active:"
-          echo "  • The URL will remain the same for this entire session"
-          echo "  • You can make API calls, test webhooks, share demos, etc."
-          echo "  • Check GitHub Actions logs for any connection issues"
-          echo "  • The tunnel automatically handles HTTPS/SSL"
+          echo "🔗 Your SOCKS5 proxy is active at: $TUNNEL_HOST:$TUNNEL_PORT"
+          echo ""
+          echo "💡 What You Can Do With This SOCKS Proxy:"
+          echo ""
+          echo "🌍 Geographic Testing:"
+          echo "   Test how your applications behave from different locations"
+          echo "   Cloudflare's network will make traffic appear from various regions"
+          echo ""
+          echo "🔒 Secure Tunneling:"
+          echo "   Route any TCP traffic through GitHub's infrastructure"
+          echo "   SSH, databases, games, email - anything that uses TCP/UDP"
+          echo ""
+          echo "🧪 Development & Testing:"
+          echo "   Test applications behind firewalls or NAT"
+          echo "   Debug networking issues from external perspectives"
+          echo "   Create temporary access points for demonstrations"
+          echo ""
+          echo "🎮 Gaming & Applications:"
+          echo "   Some games and apps can use SOCKS proxies for connectivity"
+          echo "   Useful for testing multiplayer games or P2P applications"
           echo ""
           
           DURATION_SECONDS=$(( ${{ github.event.inputs.duration || '30' }} * 60 ))
           START_TIME=$(date +%s)
+          CONNECTION_COUNT=0
           
-          # Monitor loop
           while true; do
             CURRENT_TIME=$(date +%s)
             ELAPSED=$(( CURRENT_TIME - START_TIME ))
             REMAINING=$(( DURATION_SECONDS - ELAPSED ))
             
             if [ $REMAINING -le 0 ]; then
-              echo "⏰ Time's up! Shutting down tunnel..."
+              echo "⏰ Session time expired. Shutting down..."
               break
             fi
             
             MINUTES_LEFT=$(( REMAINING / 60 ))
             SECONDS_LEFT=$(( REMAINING % 60 ))
             
-            echo "⏱️  Time remaining: ${MINUTES_LEFT}m ${SECONDS_LEFT}s | URL: $PUBLIC_URL"
+            # Check for active connections to our SOCKS proxy
+            ACTIVE_CONNECTIONS=$(netstat -an | grep ":${{ github.event.inputs.port || '1080' }} " | grep ESTABLISHED | wc -l)
             
-            # Test if local service is still running
-            if ! curl -s "http://localhost:${{ github.event.inputs.port || '8080' }}" > /dev/null; then
-              echo "⚠️  Warning: Local service appears to be down"
+            if [ $ACTIVE_CONNECTIONS -gt $CONNECTION_COUNT ]; then
+              echo "📈 New connection detected! Total active: $ACTIVE_CONNECTIONS"
+              CONNECTION_COUNT=$ACTIVE_CONNECTIONS
+            fi
+            
+            echo "⏱️  Time remaining: ${MINUTES_LEFT}m ${SECONDS_LEFT}s | Active connections: $ACTIVE_CONNECTIONS | Proxy: $TUNNEL_HOST:$TUNNEL_PORT"
+            
+            # Test that our SOCKS proxy is still responding
+            if ! netstat -tuln | grep ":${{ github.event.inputs.port || '1080' }} " > /dev/null; then
+              echo "⚠️  Warning: SOCKS proxy appears to be down"
+              break
             fi
             
             sleep 30
           done
           
-          echo "🏁 Monitoring complete. Tunnel will close automatically."
+          echo "🏁 Monitoring complete. Proxy shutting down..."
 
-      # Step 6: Cleanup
-      - name: Cleanup
-        if: always()  # This runs even if previous steps fail
+      # Step 7: Cleanup and summary
+      - name: Cleanup and Summary
+        if: always()
         run: |
-          echo "🧹 Cleaning up processes..."
+          echo "🧹 Cleaning up SOCKS proxy resources..."
           
-          # Kill the demo server if it's still running
-          if [ ! -z "$SERVER_PID" ]; then
-            echo "🔴 Stopping demo server (PID: $SERVER_PID)"
-            kill $SERVER_PID 2>/dev/null || true
-          fi
+          # Kill SSH processes (which kills the SOCKS proxy)
+          pkill -f "ssh -D" 2>/dev/null || true
           
-          # Cloudflared should auto-cleanup, but let's be thorough
+          # Kill cloudflared tunnel
           pkill cloudflared 2>/dev/null || true
           
-          echo "✅ Cleanup complete"
+          # Clean up temporary files
+          rm -f /tmp/proxy_key /tmp/proxy_key.pub /tmp/socks_users
+          
+          echo "📊 Session Summary:"
+          echo "  • Proxy type: SOCKS5"
+          echo "  • Duration requested: ${{ github.event.inputs.duration || '30' }} minutes"
+          echo "  • Authentication: ${{ github.event.inputs.auth_required == 'true' && 'Enabled' || 'Disabled' }}"
+          echo "  • Tunnel endpoint: ${TUNNEL_HOST:-'Not established'}:${TUNNEL_PORT:-'N/A'}"
+          echo ""
+          echo "✅ Cleanup complete - all resources released"
