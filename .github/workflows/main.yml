@@ -57,9 +57,9 @@ jobs:
           # Get the public URL from the ngrok API
           NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r .tunnels[0].public_url)
           
-          # Parse the hostname and port from the URL (e.g., tcp://0.tcp.ngrok.io:12345)
-          NGROK_HOSTNAME=$(echo $NGROK_URL | sed 's/tcp:\/\///' | cut -d: -f1)
-          NGROK_PORT=$(echo $NGROK_URL | cut -d: -f2)
+          # Correctly parse the hostname and port from the URL (e.g., tcp://6.tcp.ngrok.io:12345)
+          NGROK_HOSTNAME=$(echo $NGROK_URL | cut -d '/' -f3 | cut -d ':' -f1)
+          NGROK_PORT=$(echo $NGROK_URL | cut -d ':' -f3)
 
           echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
           echo "!!!  PROXY IS LIVE via ngrok and WILL SHUT DOWN IN 15 MINS.   !!!"
