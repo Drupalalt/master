@@ -43,7 +43,8 @@ jobs:
           curl -s https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip -o ngrok.zip
           unzip ngrok.zip
           chmod +x ngrok
-          ./ngrok config add-authtoken $NGROK_AUTH_TOKEN
+          # Corrected command for the downloaded ngrok version (v2)
+          ./ngrok authtoken $NGROK_AUTH_TOKEN
           
           # Start ngrok tunnel in the background for TCP traffic on port 1080
           echo "Starting ngrok tunnel..."
