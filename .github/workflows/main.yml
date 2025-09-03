@@ -1,329 +1,65 @@
-name: Public SOCKS Proxy with Cloudflared
+# This GitHub Actions workflow sets up a temporary SOCKS5 proxy for testing purposes.
+# It runs on every push to the main branch.
 
-# This workflow creates a publicly accessible SOCKS proxy using SSH and Cloudflare tunnel
-# SOCKS proxies can handle any TCP/UDP traffic, not just HTTP like regular web proxies
+name: SOCKS Proxy for Testing
+
 on:
-  workflow_dispatch:  # Manual trigger from GitHub UI
-    inputs:
-      port:
-        description: 'SOCKS proxy port (default: 1080)'
-        required: false
-        default: '1080'
-      duration:
-        description: 'How long to keep proxy active in minutes (default: 30)'
-        required: false
-        default: '30'
-      auth_required:
-        description: 'Require authentication (recommended for security)'
-        type: boolean
-        required: false
-        default: true
+  # Triggers the workflow on push events but only for the "main" branch
+  push:
+    branches: [ "main" ]
+  
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
 
 jobs:
-  socks-proxy:
+  test-with-proxy:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
     
     steps:
-      # Step 1: Prepare the environment
-      - name: Environment Setup
-        run: |
-          echo "🔧 Setting up SOCKS proxy environment..."
-          echo "📋 Configuration:"
-          echo "  • SOCKS Port: ${{ github.event.inputs.port || '1080' }}"
-          echo "  • Duration: ${{ github.event.inputs.duration || '30' }} minutes"
-          echo "  • Authentication: ${{ github.event.inputs.auth_required == 'true' && 'Enabled' || 'Disabled' }}"
-          echo ""
-          
-          # Install any additional tools we might need
-          sudo apt-get update -q
-          sudo apt-get install -y curl jq netstat-nat
-          
-          echo "✅ Environment ready"
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      # Step 2: Download and install cloudflared (same as before, but worth explaining again)
-      - name: Install Cloudflared
-        run: |
-          echo "🔽 Installing Cloudflare tunnel client..."
-          
-          # The beauty of cloudflared is that it can tunnel ANY TCP service, not just HTTP
-          # This makes it perfect for our SOCKS proxy since SOCKS works over TCP
-          
-          ARCH=$(uname -m)
-          case $ARCH in
-            x86_64) ARCH="amd64" ;;
-            aarch64) ARCH="arm64" ;;
-            armv7l) ARCH="arm" ;;
-          esac
-          
-          DOWNLOAD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
-          
-          echo "📥 Downloading cloudflared for $ARCH architecture..."
-          curl -L "$DOWNLOAD_URL" -o cloudflared
-          chmod +x cloudflared
-          sudo mv cloudflared /usr/local/bin/
-          
-          cloudflared --version
-          echo "✅ Cloudflared installed successfully"
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y gcc make
 
-      # Step 3: Generate authentication credentials if required
-      - name: Setup Authentication
+      - name: Set up and run SOCKS5 proxy
         run: |
-          if [ "${{ github.event.inputs.auth_required }}" == "true" ]; then
-            echo "🔐 Setting up SOCKS authentication..."
-            
-            # Generate random credentials for security
-            # In a real-world scenario, you'd want to use secrets or more secure methods
-            SOCKS_USER="proxy_$(openssl rand -hex 4)"
-            SOCKS_PASS="$(openssl rand -base64 16)"
-            
-            echo "👤 Generated credentials:"
-            echo "  Username: $SOCKS_USER"
-            echo "  Password: $SOCKS_PASS"
-            echo ""
-            
-            # Store in environment for later steps
-            echo "SOCKS_USER=$SOCKS_USER" >> $GITHUB_ENV
-            echo "SOCKS_PASS=$SOCKS_PASS" >> $GITHUB_ENV
-            echo "AUTH_ENABLED=true" >> $GITHUB_ENV
-            
-            # Create a simple authentication file for potential future use
-            echo "$SOCKS_USER:$SOCKS_PASS" > /tmp/socks_users
-            
-            echo "🔒 Authentication configured"
-          else
-            echo "⚠️  Authentication disabled - proxy will accept any connection"
-            echo "AUTH_ENABLED=false" >> $GITHUB_ENV
-          fi
+          # Clone the microsocks repository, a lightweight SOCKS5 server
+          git clone https://github.com/rofl0r/microsocks.git
+          cd microsocks
+          
+          # Compile the server
+          make
+          
+          # --- IMPORTANT ---
+          # For real-world use, store credentials in GitHub Secrets, not here.
+          export PROXY_USER="testuser"
+          export PROXY_PASS="changeThisToAStrongPassword!"
+          
+          # Run the SOCKS5 proxy in the background on port 1080
+          # We bind to 0.0.0.0 to allow external connections.
+          echo "Starting SOCKS5 proxy on 0.0.0.0:1080"
+          ./microsocks -i 0.0.0.0 -p 1080 -u $PROXY_USER -P $PROXY_PASS &
+          
+      - name: Wait for proxy to initialize
+        run: sleep 5 # Give the proxy a few seconds to start up
 
-      # Step 4: Create the SOCKS proxy using SSH dynamic port forwarding
-      # This is the clever part - SSH can create a SOCKS proxy with just one command
-      - name: Start SOCKS Proxy Server
+      - name: Display Connection Details & Keep Alive
         run: |
-          echo "🚀 Starting SOCKS proxy server..."
-          
-          PORT="${{ github.event.inputs.port || '1080' }}"
-          
-          # SSH dynamic port forwarding creates a SOCKS5 proxy automatically
-          # The -D flag tells SSH to listen on a port and forward SOCKS connections
-          # We're creating a "fake" SSH connection to localhost that just serves as a SOCKS proxy
-          
-          # Generate a temporary SSH key pair for the connection
-          ssh-keygen -t rsa -b 2048 -f /tmp/proxy_key -N "" -q
-          
-          # Add the public key to authorized_keys so we can connect to ourselves
-          mkdir -p ~/.ssh
-          cat /tmp/proxy_key.pub >> ~/.ssh/authorized_keys
-          chmod 600 ~/.ssh/authorized_keys
-          chmod 600 /tmp/proxy_key
-          
-          # Configure SSH to allow local connections
-          echo "StrictHostKeyChecking no" >> ~/.ssh/config
-          echo "UserKnownHostsFile /dev/null" >> ~/.ssh/config
-          
-          # Start SSH daemon if it's not running (it should be on GitHub runners)
-          sudo service ssh start 2>/dev/null || true
-          
-          echo "🔑 SSH configuration complete"
-          
-          # Now create the SOCKS proxy using SSH dynamic port forwarding
-          # The magic happens here: -D creates a SOCKS proxy, -N means no command execution
-          # -f runs in background, -q suppresses output
-          ssh -D 0.0.0.0:$PORT -f -q -N -i /tmp/proxy_key $(whoami)@localhost
-          
-          SOCKS_PID=$!
-          echo "SOCKS_PID=$SOCKS_PID" >> $GITHUB_ENV
-          
-          echo "🧦 SOCKS proxy started on port $PORT"
-          
-          # Verify the proxy is listening
-          sleep 2
-          if netstat -tuln | grep ":$PORT "; then
-            echo "✅ SOCKS proxy is listening on port $PORT"
-          else
-            echo "❌ Failed to start SOCKS proxy"
-            exit 1
-          fi
+          PUBLIC_IP=$(curl -s ifconfig.me)
 
-      # Step 5: Create the public tunnel to our SOCKS proxy
-      - name: Create Public Tunnel
-        run: |
-          echo "🌉 Creating public tunnel to SOCKS proxy..."
-          
-          PORT="${{ github.event.inputs.port || '1080' }}"
-          DURATION="${{ github.event.inputs.duration || '30' }}"
-          
-          # Here's where it gets interesting: cloudflared can tunnel TCP services
-          # We use --tcp-tunnel to expose our SOCKS proxy directly
-          
-          TUNNEL_LOG=$(mktemp)
-          
-          echo "🔗 Establishing tunnel (this may take 10-15 seconds)..."
-          
-          # Start the TCP tunnel to our SOCKS proxy
-          timeout ${DURATION}m cloudflared tunnel --url localhost:$PORT 2>&1 | tee "$TUNNEL_LOG" &
-          TUNNEL_PID=$!
-          
-          echo "🚇 Tunnel process started with PID: $TUNNEL_PID"
-          
-          # Wait for tunnel to establish and extract connection details
-          echo "⏳ Waiting for tunnel establishment..."
-          for i in {1..30}; do
-            if grep -q "Registered tunnel connection" "$TUNNEL_LOG" 2>/dev/null; then
-              # Extract the tunnel hostname and port
-              TUNNEL_HOST=$(grep -o "[a-z0-9-]*\.trycloudflare\.com" "$TUNNEL_LOG" | head -1)
-              TUNNEL_PORT=$(grep -o "https://[^:]*:\([0-9]*\)" "$TUNNEL_LOG" | sed 's/.*://g' | head -1)
-              
-              if [ ! -z "$TUNNEL_HOST" ]; then
-                break
-              fi
-            fi
-            echo "  Attempt $i/30: Checking tunnel status..."
-            sleep 2
-          done
-          
-          if [ ! -z "$TUNNEL_HOST" ]; then
-            echo ""
-            echo "🎊 SUCCESS! SOCKS proxy tunnel is now active!"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo ""
-            echo "🧦 SOCKS5 Proxy Details:"
-            echo "   Host: $TUNNEL_HOST"
-            echo "   Port: ${TUNNEL_PORT:-443}"
-            echo "   Type: SOCKS5"
-            echo ""
-            
-            if [ "$AUTH_ENABLED" == "true" ]; then
-              echo "🔐 Authentication Required:"
-              echo "   Username: $SOCKS_USER"
-              echo "   Password: $SOCKS_PASS"
-              echo ""
-            else
-              echo "⚠️  No authentication required"
-              echo ""
-            fi
-            
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo ""
-            echo "📱 How to Use This Proxy:"
-            echo ""
-            echo "1. 🌐 For Web Browsers:"
-            echo "   • Chrome: Settings → Advanced → System → Open proxy settings"
-            echo "   • Firefox: Settings → Network Settings → Manual proxy"
-            echo "   • Set SOCKS5 proxy to: $TUNNEL_HOST:${TUNNEL_PORT:-443}"
-            echo ""
-            echo "2. 🖥️  For Applications:"
-            echo "   • Configure SOCKS5 proxy in your app settings"
-            echo "   • Use host: $TUNNEL_HOST, port: ${TUNNEL_PORT:-443}"
-            echo ""
-            echo "3. 🔧 Command Line Examples:"
-            if [ "$AUTH_ENABLED" == "true" ]; then
-              echo "   curl --socks5 $SOCKS_USER:$SOCKS_PASS@$TUNNEL_HOST:${TUNNEL_PORT:-443} https://httpbin.org/ip"
-              echo "   ssh -o ProxyCommand='nc -X 5 -x $TUNNEL_HOST:${TUNNEL_PORT:-443} %h %p' user@target-server"
-            else
-              echo "   curl --socks5 $TUNNEL_HOST:${TUNNEL_PORT:-443} https://httpbin.org/ip"
-              echo "   ssh -o ProxyCommand='nc -X 5 -x $TUNNEL_HOST:${TUNNEL_PORT:-443} %h %p' user@target-server"
-            fi
-            echo ""
-            
-            # Store connection details for monitoring
-            echo "TUNNEL_HOST=$TUNNEL_HOST" >> $GITHUB_ENV
-            echo "TUNNEL_PORT=${TUNNEL_PORT:-443}" >> $GITHUB_ENV
-            
-            # Create a GitHub Actions notice
-            echo "::notice title=SOCKS Proxy Active::SOCKS5 proxy available at $TUNNEL_HOST:${TUNNEL_PORT:-443}"
-            
-          else
-            echo "❌ Failed to establish tunnel"
-            echo "📋 Debug information:"
-            cat "$TUNNEL_LOG"
-            exit 1
-          fi
+          echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+          echo "!!! WARNING: THIS PROXY IS EXPOSED TO THE PUBLIC INTERNET!    !!!"
+          echo "!!! IT IS PASSWORD-PROTECTED AND WILL SHUT DOWN IN 15 MINS. !!!"
+          echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+          echo ""
+          echo "--- Connect with the following details: ---"
+          echo "IP Address: $PUBLIC_IP"
+          echo "Port: 1080"
+          echo "Username: testuser"
+          echo "Password: changeThisToAStrongPassword!"
+          echo "-------------------------------------------"
+          echo ""
+          echo "The workflow will remain active for 15 minutes for testing."
+          sleep 890 # Keep alive for ~15 mins total, accounting for other steps.
 
-      # Step 6: Monitor the proxy and provide usage statistics
-      - name: Monitor SOCKS Proxy
-        run: |
-          echo "👀 Monitoring SOCKS proxy for ${{ github.event.inputs.duration || '30' }} minutes..."
-          echo ""
-          echo "🔗 Your SOCKS5 proxy is active at: $TUNNEL_HOST:$TUNNEL_PORT"
-          echo ""
-          echo "💡 What You Can Do With This SOCKS Proxy:"
-          echo ""
-          echo "🌍 Geographic Testing:"
-          echo "   Test how your applications behave from different locations"
-          echo "   Cloudflare's network will make traffic appear from various regions"
-          echo ""
-          echo "🔒 Secure Tunneling:"
-          echo "   Route any TCP traffic through GitHub's infrastructure"
-          echo "   SSH, databases, games, email - anything that uses TCP/UDP"
-          echo ""
-          echo "🧪 Development & Testing:"
-          echo "   Test applications behind firewalls or NAT"
-          echo "   Debug networking issues from external perspectives"
-          echo "   Create temporary access points for demonstrations"
-          echo ""
-          echo "🎮 Gaming & Applications:"
-          echo "   Some games and apps can use SOCKS proxies for connectivity"
-          echo "   Useful for testing multiplayer games or P2P applications"
-          echo ""
-          
-          DURATION_SECONDS=$(( ${{ github.event.inputs.duration || '30' }} * 60 ))
-          START_TIME=$(date +%s)
-          CONNECTION_COUNT=0
-          
-          while true; do
-            CURRENT_TIME=$(date +%s)
-            ELAPSED=$(( CURRENT_TIME - START_TIME ))
-            REMAINING=$(( DURATION_SECONDS - ELAPSED ))
-            
-            if [ $REMAINING -le 0 ]; then
-              echo "⏰ Session time expired. Shutting down..."
-              break
-            fi
-            
-            MINUTES_LEFT=$(( REMAINING / 60 ))
-            SECONDS_LEFT=$(( REMAINING % 60 ))
-            
-            # Check for active connections to our SOCKS proxy
-            ACTIVE_CONNECTIONS=$(netstat -an | grep ":${{ github.event.inputs.port || '1080' }} " | grep ESTABLISHED | wc -l)
-            
-            if [ $ACTIVE_CONNECTIONS -gt $CONNECTION_COUNT ]; then
-              echo "📈 New connection detected! Total active: $ACTIVE_CONNECTIONS"
-              CONNECTION_COUNT=$ACTIVE_CONNECTIONS
-            fi
-            
-            echo "⏱️  Time remaining: ${MINUTES_LEFT}m ${SECONDS_LEFT}s | Active connections: $ACTIVE_CONNECTIONS | Proxy: $TUNNEL_HOST:$TUNNEL_PORT"
-            
-            # Test that our SOCKS proxy is still responding
-            if ! netstat -tuln | grep ":${{ github.event.inputs.port || '1080' }} " > /dev/null; then
-              echo "⚠️  Warning: SOCKS proxy appears to be down"
-              break
-            fi
-            
-            sleep 30
-          done
-          
-          echo "🏁 Monitoring complete. Proxy shutting down..."
-
-      # Step 7: Cleanup and summary
-      - name: Cleanup and Summary
-        if: always()
-        run: |
-          echo "🧹 Cleaning up SOCKS proxy resources..."
-          
-          # Kill SSH processes (which kills the SOCKS proxy)
-          pkill -f "ssh -D" 2>/dev/null || true
-          
-          # Kill cloudflared tunnel
-          pkill cloudflared 2>/dev/null || true
-          
-          # Clean up temporary files
-          rm -f /tmp/proxy_key /tmp/proxy_key.pub /tmp/socks_users
-          
-          echo "📊 Session Summary:"
-          echo "  • Proxy type: SOCKS5"
-          echo "  • Duration requested: ${{ github.event.inputs.duration || '30' }} minutes"
-          echo "  • Authentication: ${{ github.event.inputs.auth_required == 'true' && 'Enabled' || 'Disabled' }}"
-          echo "  • Tunnel endpoint: ${TUNNEL_HOST:-'Not established'}:${TUNNEL_PORT:-'N/A'}"
-          echo ""
-          echo "✅ Cleanup complete - all resources released"
