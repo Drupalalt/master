@@ -1,63 +1,244 @@
-name: socks5-ngrok-no-auth
+name: Public Proxy with Cloudflared
+
+# This workflow creates a publicly accessible tunnel to services running in GitHub Actions
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Allows manual triggering from GitHub UI
+    inputs:
+      port:
+        description: 'Local port to expose (default: 8080)'
+        required: false
+        default: '8080'
+      duration:
+        description: 'How long to keep tunnel open in minutes (default: 30)'
+        required: false
+        default: '30'
 
 jobs:
-  proxy:
+  proxy-tunnel:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # keep alive up to 6h
+    timeout-minutes: 60  # Maximum runtime to prevent runaway jobs
+    
     steps:
-      - name: Install dependencies (microsocks, unzip, jq, curl)
+      # Step 1: Set up the basic environment
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      # Step 2: Download and install cloudflared
+      # We're getting it directly from Cloudflare's releases
+      - name: Download Cloudflared
         run: |
-          sudo apt-get update
-          sudo apt-get install -y microsocks unzip jq curl
+          echo "🔽 Downloading Cloudflared tunnel client..."
+          
+          # Detect the architecture for the right binary
+          ARCH=$(uname -m)
+          case $ARCH in
+            x86_64) ARCH="amd64" ;;
+            aarch64) ARCH="arm64" ;;
+            armv7l) ARCH="arm" ;;
+          esac
+          
+          # Download the latest version directly from GitHub releases
+          DOWNLOAD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
+          
+          echo "📥 Downloading for architecture: $ARCH"
+          curl -L "$DOWNLOAD_URL" -o cloudflared
+          
+          # Make it executable and move to system path
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/
+          
+          # Verify installation
+          echo "✅ Cloudflared version:"
+          cloudflared --version
 
-      - name: Download and install ngrok (zip + unzip)
+      # Step 3: Create a simple demo service to proxy
+      # This runs a basic HTTP server that we'll expose to the internet
+      - name: Start Demo Service
         run: |
-          set -euxo pipefail
-          # Download ngrok zip (Linux x86_64). If this URL ever changes, replace with the current Linux zip URL from ngrok downloads.
-          NGROK_ZIP_URL="https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip"
-          curl -L "$NGROK_ZIP_URL" -o ngrok.zip
-          unzip -o ngrok.zip
-          sudo install -m 0755 ngrok /usr/local/bin/ngrok
-          ngrok version || true
+          echo "🚀 Starting demo HTTP service on port ${{ github.event.inputs.port || '8080' }}..."
+          
+          # Create a simple HTML page to serve
+          cat > index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>GitHub Actions Tunnel Demo</title>
+              <style>
+                  body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+                  .status { background: #e8f5e8; padding: 15px; border-radius: 8px; margin: 20px 0; }
+                  .info { background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; }
+                  code { background: #f5f5f5; padding: 2px 8px; border-radius: 4px; }
+              </style>
+          </head>
+          <body>
+              <h1>🎉 GitHub Actions Tunnel Active!</h1>
+              
+              <div class="status">
+                  <strong>✅ Status:</strong> Tunnel is running successfully!
+              </div>
+              
+              <div class="info">
+                  <h2>📡 Connection Details</h2>
+                  <p><strong>Runner:</strong> ${{ runner.os }} on GitHub Actions</p>
+                  <p><strong>Workflow:</strong> ${{ github.workflow }}</p>
+                  <p><strong>Repository:</strong> ${{ github.repository }}</p>
+                  <p><strong>Run ID:</strong> ${{ github.run_id }}</p>
+                  <p><strong>Timestamp:</strong> <span id="timestamp"></span></p>
+              </div>
+              
+              <div class="info">
+                  <h2>🔧 Technical Info</h2>
+                  <p>This service is running inside a GitHub Actions runner and exposed via Cloudflare tunnel.</p>
+                  <p>Local port: <code>${{ github.event.inputs.port || '8080' }}</code></p>
+                  <p>The tunnel will remain active for ${{ github.event.inputs.duration || '30' }} minutes.</p>
+              </div>
+              
+              <script>
+                  document.getElementById('timestamp').textContent = new Date().toISOString();
+                  
+                  // Update timestamp every second
+                  setInterval(() => {
+                      document.getElementById('timestamp').textContent = new Date().toISOString();
+                  }, 1000);
+              </script>
+          </body>
+          </html>
+          EOF
+          
+          # Start Python HTTP server in background
+          python3 -m http.server ${{ github.event.inputs.port || '8080' }} &
+          SERVER_PID=$!
+          
+          echo "🌐 Demo server started with PID: $SERVER_PID"
+          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+          
+          # Wait a moment for server to start
+          sleep 3
+          
+          # Test local connection
+          curl -s "http://localhost:${{ github.event.inputs.port || '8080' }}" > /dev/null && echo "✅ Local server responding" || echo "❌ Local server not responding"
 
-      - name: Start microsocks (SOCKS5 on 127.0.0.1:1080, no auth)
+      # Step 4: Create the Cloudflare tunnel
+      # This is where the magic happens - exposing our local service to the internet
+      - name: Create Cloudflare Tunnel
         run: |
-          nohup microsocks -i 127.0.0.1 -p 1080 > microsocks.log 2>&1 &
-          sleep 2
-          ss -lntp || true
-
-      - name: Configure ngrok authtoken
-        env:
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
-        run: |
-          # For ngrok v2 CLI syntax; if using v3, replace with: ngrok config add-authtoken "$NGROK_AUTHTOKEN"
-          ngrok authtoken "$NGROK_AUTHTOKEN"
-
-      - name: Start ngrok TCP tunnel to port 1080
-        run: |
-          # Run ngrok in background; expose TCP tunnel to local 1080
-          nohup ngrok tcp 1080 --log=stdout > ngrok.log 2>&1 &
-          # Wait for API to be ready and extract public tcp URL
+          echo "🌉 Creating Cloudflare tunnel..."
+          
+          PORT="${{ github.event.inputs.port || '8080' }}"
+          DURATION="${{ github.event.inputs.duration || '30' }}"
+          
+          echo "📋 Configuration:"
+          echo "  • Local port: $PORT"
+          echo "  • Duration: $DURATION minutes"
+          
+          # Start cloudflared tunnel in background and capture output
+          echo "🔗 Starting tunnel (this may take 10-15 seconds)..."
+          
+          # Use a temporary file to capture the tunnel URL
+          TUNNEL_LOG=$(mktemp)
+          
+          # Start the tunnel in background, logging output
+          timeout ${DURATION}m cloudflared tunnel --url "http://localhost:$PORT" 2>&1 | tee "$TUNNEL_LOG" &
+          TUNNEL_PID=$!
+          
+          echo "🚇 Tunnel process started with PID: $TUNNEL_PID"
+          
+          # Wait for tunnel to establish and extract the public URL
+          echo "⏳ Waiting for tunnel establishment..."
           for i in {1..30}; do
-            sleep 2
-            URL=$(curl -fsS http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[]? | select(.proto=="tcp") | .public_url' | head -n1 || true)
-            if [ -n "${URL:-}" ] && [ "$URL" != "null" ]; then
-              echo "$URL" > tunnel_url.txt
+            if grep -q "https://.*\.trycloudflare\.com" "$TUNNEL_LOG" 2>/dev/null; then
+              PUBLIC_URL=$(grep -o "https://[^[:space:]]*\.trycloudflare\.com" "$TUNNEL_LOG" | head -1)
               break
             fi
+            echo "  Attempt $i/30: Checking tunnel status..."
+            sleep 2
           done
-          echo "Discovered tunnel URL: $(cat tunnel_url.txt || echo 'NOT FOUND')"
-          test -s tunnel_url.txt
+          
+          if [ ! -z "$PUBLIC_URL" ]; then
+            echo ""
+            echo "🎊 SUCCESS! Tunnel is now active!"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+            echo "🌐 PUBLIC URL: $PUBLIC_URL"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+            echo "📝 Instructions:"
+            echo "  1. Click the URL above to access your service"
+            echo "  2. The tunnel will stay active for $DURATION minutes"
+            echo "  3. Monitor this workflow log for any issues"
+            echo ""
+            
+            # Also output as a GitHub Actions notice
+            echo "::notice title=Tunnel Active::Public URL available at $PUBLIC_URL"
+            
+            # Store URL in environment for potential later steps
+            echo "PUBLIC_URL=$PUBLIC_URL" >> $GITHUB_ENV
+            
+          else
+            echo "❌ Failed to establish tunnel after 60 seconds"
+            echo "📋 Debug information:"
+            echo "--- Tunnel Log ---"
+            cat "$TUNNEL_LOG"
+            echo "--- End Log ---"
+            exit 1
+          fi
 
-      - name: Show connection info
-        id: info
+      # Step 5: Keep the workflow alive and monitor
+      - name: Monitor Tunnel
         run: |
-          TUNNEL_URL="$(cat tunnel_url.txt)"
-          echo "tunnel_url=$TUNNEL_URL" >> "$GITHUB_OUTPUT"
-          echo "SOCKS5 endpoint (no auth): $TUNNEL_URL"
-          echo "Connect with: socks5://HOST:PORT  (replace with the tcp host:port above)"
+          echo "👀 Monitoring tunnel for ${{ github.event.inputs.duration || '30' }} minutes..."
+          echo "🔗 Your service is available at: $PUBLIC_URL"
+          echo ""
+          echo "💡 Tips while your tunnel is active:"
+          echo "  • The URL will remain the same for this entire session"
+          echo "  • You can make API calls, test webhooks, share demos, etc."
+          echo "  • Check GitHub Actions logs for any connection issues"
+          echo "  • The tunnel automatically handles HTTPS/SSL"
+          echo ""
+          
+          DURATION_SECONDS=$(( ${{ github.event.inputs.duration || '30' }} * 60 ))
+          START_TIME=$(date +%s)
+          
+          # Monitor loop
+          while true; do
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$(( CURRENT_TIME - START_TIME ))
+            REMAINING=$(( DURATION_SECONDS - ELAPSED ))
+            
+            if [ $REMAINING -le 0 ]; then
+              echo "⏰ Time's up! Shutting down tunnel..."
+              break
+            fi
+            
+            MINUTES_LEFT=$(( REMAINING / 60 ))
+            SECONDS_LEFT=$(( REMAINING % 60 ))
+            
+            echo "⏱️  Time remaining: ${MINUTES_LEFT}m ${SECONDS_LEFT}s | URL: $PUBLIC_URL"
+            
+            # Test if local service is still running
+            if ! curl -s "http://localhost:${{ github.event.inputs.port || '8080' }}" > /dev/null; then
+              echo "⚠️  Warning: Local service appears to be down"
+            fi
+            
+            sleep 30
+          done
+          
+          echo "🏁 Monitoring complete. Tunnel will close automatically."
 
-      - name: Keep job alive
-        run: sleep 6h
+      # Step 6: Cleanup
+      - name: Cleanup
+        if: always()  # This runs even if previous steps fail
+        run: |
+          echo "🧹 Cleaning up processes..."
+          
+          # Kill the demo server if it's still running
+          if [ ! -z "$SERVER_PID" ]; then
+            echo "🔴 Stopping demo server (PID: $SERVER_PID)"
+            kill $SERVER_PID 2>/dev/null || true
+          fi
+          
+          # Cloudflared should auto-cleanup, but let's be thorough
+          pkill cloudflared 2>/dev/null || true
+          
+          echo "✅ Cleanup complete"
