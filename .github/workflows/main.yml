@@ -39,12 +39,13 @@ jobs:
         env:
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
-          # Download and configure ngrok
-          curl -s https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip -o ngrok.zip
-          unzip ngrok.zip
+          # Download and configure the latest ngrok agent (v3)
+          curl -s https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o ngrok.tgz
+          tar -xvzf ngrok.tgz
           chmod +x ngrok
-          # Corrected command for the downloaded ngrok version (v2)
-          ./ngrok authtoken $NGROK_AUTH_TOKEN
+          
+          # Use the 'config add-authtoken' command for ngrok v3
+          ./ngrok config add-authtoken $NGROK_AUTH_TOKEN
           
           # Start ngrok tunnel in the background for TCP traffic on port 1080
           echo "Starting ngrok tunnel..."
